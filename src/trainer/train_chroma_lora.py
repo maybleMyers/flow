@@ -17,7 +17,7 @@ from torchvision.utils import save_image
 from torchvision.utils import save_image, make_grid
 from torch.utils.data import DataLoader
 
-from torchastic import Compass, StochasticAccumulator
+from torchastic import AdamW, StochasticAccumulator
 import random
 
 from transformers import T5Tokenizer
@@ -238,7 +238,7 @@ def init_optimizer(model, trained_layer_keywords, lr, wd, warmup_steps):
     # return hooks so it can be released later on
     hooks = StochasticAccumulator.assign_hooks(model)
     # init optimizer
-    optimizer = Compass(
+    optimizer = AdamW(
         [
             {
                 "params": [
