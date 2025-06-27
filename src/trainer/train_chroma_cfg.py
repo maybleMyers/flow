@@ -756,7 +756,7 @@ def train_chroma(rank, world_size, debug=False):
                         )
 
                     # target vector for training
-                    target_cfg_vector = pred_neg + training_config.cfg_scale_strength * (pred_neg - target[tmb_i * mb : tmb_i * mb + mb])
+                    target_cfg_vector = pred_neg + training_config.cfg_scale_strength * (target[tmb_i * mb : tmb_i * mb + mb] - pred_neg)
 
                 # do this inside for loops!
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
