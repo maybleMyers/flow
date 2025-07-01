@@ -176,6 +176,13 @@ def sample_from_distribution(x, probabilities, num_samples, device=None):
 
     return sampled_values
 
+def one_hot_presence_tensor(str_list):
+    """
+    Converts a list of strings to a tensor where:
+    - 0 indicates an empty string
+    - 1 indicates a non-empty string
+    """
+    return torch.tensor([0.0 if s == "" else 1.0 for s in str_list], dtype=torch.bfloat16)
 
 def prepare_sot_pairings(latents):
     # stochastic optimal transport pairings
@@ -552,6 +559,9 @@ def train_chroma(rank, world_size, debug=False):
             # just in case the dataloader is failing
             caption = [x if x is not None else "" for x in caption]
             caption = [x.lower() if torch.rand(1).item() < 0.25 else x for x in caption]
+            # flag the uncond as 0 for cfg training
+            is_uncond_onehot = one_hot_presence_tensor(caption).to(rank, non_blocking=True) * training_config.cfg_scale_strength
+
             loss_weighting = torch.tensor(loss_weighting, device=rank)
             if counter % training_config.change_layer_every == 0:
                 # periodically remove the optimizer and swap it with new one
@@ -756,7 +766,14 @@ def train_chroma(rank, world_size, debug=False):
                         )
 
                     # target vector for training
+
+                    # flags to mark which one is uncond
+                    # reshape to [batch_size, 1, 1, ...]
+                    flags = is_uncond_onehot[tmb_i * mb : tmb_i * mb + mb].view(-1, *([1] * (target.ndim - 1)))
+                    # set all to have CFG
                     target_cfg_vector = pred_neg + training_config.cfg_scale_strength * (target[tmb_i * mb : tmb_i * mb + mb] - pred_neg)
+                    # mask and replace the uncond with classical target
+                    target_cfg_vector = torch.where(flags.bool(), target_cfg_vector, target[tmb_i * mb : tmb_i * mb + mb])
 
                 # do this inside for loops!
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
