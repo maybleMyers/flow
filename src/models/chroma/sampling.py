@@ -15,13 +15,15 @@ def get_noise(
     device: torch.device,
     dtype: torch.dtype,
     seed: int,
+    latent_depth: int = 16,
+    spatial_compression: int = 8,
 ):
     return torch.randn(
         num_samples,
-        16,
+        latent_depth,
         # allow for packing
-        2 * math.ceil(height / 16),
-        2 * math.ceil(width / 16),
+        math.ceil(height / spatial_compression),
+        math.ceil(width / spatial_compression),
         device=device,
         dtype=dtype,
         generator=torch.Generator(device=device).manual_seed(seed),
