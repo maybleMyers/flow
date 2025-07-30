@@ -15,8 +15,8 @@ def get_noise(
     device: torch.device,
     dtype: torch.dtype,
     seed: int,
-    latent_depth: int = 64,
-    spatial_compression: int = 32,
+    latent_depth: int = 16,
+    spatial_compression: int = 8,
 ):
     return torch.randn(
         num_samples,
