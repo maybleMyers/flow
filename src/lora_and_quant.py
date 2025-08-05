@@ -68,10 +68,19 @@ class LinearWithLoRA(nn.Module):
         else:
             self.lora = LoRALayer(linear.in_features, linear.out_features, rank, alpha)
         self.lora.to(device=linear.weight.device)
+        self.lora_enabled = True  # toggle flag
 
+    def enable_lora(self, mode=True):
+        self.lora_enabled = mode
+
+    def disable_lora(self):
+        self.lora_enabled = False
+    
     def forward(self, x):
-        return self.linear(x) + self.lora(x)
-
+        if self.lora_enabled:
+            return self.linear(x) + self.lora(x)
+        else:
+            return self.linear(x)
 
 class Quantized8BitLinearWithLoRA(nn.Module):
     def __init__(
@@ -105,9 +114,19 @@ class Quantized8BitLinearWithLoRA(nn.Module):
             self.lora = LoRALayer(linear.in_features, linear.out_features, rank, alpha)
 
         self.lora.to(device=linear.weight.device)
+        self.lora_enabled = True  # toggle flag
 
+    def enable_lora(self, mode=True):
+        self.lora_enabled = mode
+
+    def disable_lora(self):
+        self.lora_enabled = False
+    
     def forward(self, x):
-        return F.linear(x, self.linear_weight, self.linear_bias) + self.lora(x)
+        if self.lora_enabled:
+            return F.linear(x, self.linear_weight, self.linear_bias) + self.lora(x)
+        else:
+            return F.linear(x, self.linear_weight, self.linear_bias)
 
 
 class Quantized4BitLinearWithLoRA(nn.Module):
@@ -134,16 +153,33 @@ class Quantized4BitLinearWithLoRA(nn.Module):
             self.lora = LoRALayer(linear.in_features, linear.out_features, rank, alpha)
 
         self.lora.to(device=linear.weight.device)
+        self.lora_enabled = True  # toggle flag
+
+    def enable_lora(self, mode=True):
+        self.lora_enabled = mode
+
+    def disable_lora(self):
+        self.lora_enabled = False
 
     def forward(self, x):
-        if self.linear_bias is not None:
-            return F.linear(
-                x,
-                dequantize_nf4(*self.linear_weight),
-                dequantize_nf4(*self.linear_bias),
-            ) + self.lora(x)
+        if self.lora_enabled:
+            if self.linear_bias is not None:
+                return F.linear(
+                    x,
+                    dequantize_nf4(*self.linear_weight),
+                    dequantize_nf4(*self.linear_bias),
+                ) + self.lora(x)
+            else:
+                return F.linear(x, dequantize_nf4(*self.linear_weight), None) + self.lora(x)
         else:
-            return F.linear(x, dequantize_nf4(*self.linear_weight), None) + self.lora(x)
+            if self.linear_bias is not None:
+                return F.linear(
+                    x,
+                    dequantize_nf4(*self.linear_weight),
+                    dequantize_nf4(*self.linear_bias),
+                )
+            else:
+                return F.linear(x, dequantize_nf4(*self.linear_weight), None)
 
 
 class Quantized8bitLinear(nn.Module):
@@ -363,3 +399,9 @@ def merge_lora_weights(model, replacement_module=LinearWithLoRA):
             merge_lora_weights(module, replacement_module)
 
     return model
+
+
+def set_lora_enabled(module, enabled=True, lora_module=LinearWithLoRA):
+    for child in module.modules():
+        if isinstance(child, lora_module):
+            child.enable_lora(enabled)
