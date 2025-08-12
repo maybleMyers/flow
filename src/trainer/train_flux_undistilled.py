@@ -474,12 +474,12 @@ def inference_wrapper(
 
 
 # MODIFICATION: Renamed train_chroma to train_flux
-def train_flux(rank, world_size, debug=False):
+def train_flux(rank, world_size, debug=False, json_config="training_config_flux.json"):
     # Initialize distributed training
     if not debug:
         setup_distributed(rank, world_size)
 
-    config_data = load_config_from_json("training_config.json")
+    config_data = load_config_from_json(json_config)
 
     training_config = TrainingConfig(**config_data["training"])
     inference_config = InferenceConfig(**config_data["inference"])
