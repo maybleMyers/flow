@@ -448,12 +448,12 @@ def inference_wrapper(
                 image_pos_id,
                 t5_embed,
                 t5_embed_neg,
-                clip_embed, # Added clip embedding
-                clip_embed_neg, # Added negative clip embedding
                 text_ids,
                 neg_text_ids,
                 text_inputs.attention_mask,
                 text_inputs_neg.attention_mask,
+                clip_embed, # Added clip embedding
+                clip_embed_neg, # Added negative clip embedding
                 timesteps,
                 GUIDANCE,
                 CFG,
@@ -521,7 +521,7 @@ def train_flux(rank, world_size, debug=False):
 
         # lobotomize the guidance layer
         model.params.guidance_embed = False
-        
+
         # randomly train inner layers at a time
         trained_double_blocks = list(range(len(model.double_blocks)))
         trained_single_blocks = list(range(len(model.single_blocks)))
