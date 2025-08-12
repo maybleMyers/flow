@@ -127,6 +127,7 @@ def denoise_batched_timesteps(
         txt: Text conditioning tensor, shape (B, L, D).
         txt_ids: Text IDs tensor, shape (B, L).
         txt_mask: Text mask tensor, shape (B, L).
+        clip_embedding: CLIP text embedding tensor.
         timesteps: Tensor containing the time points for each batch sample.
                    Shape (B, N), where B is the batch size and N is the
                    number of time points (e.g., [t_start, ..., t_end]).
@@ -181,10 +182,240 @@ def denoise_batched_timesteps(
         # dt = t_next - t_curr (Note: if time goes 1->0, dt will be negative)
         dt_batch = t_next_batch - t_curr_batch  # Shape: (B,)
 
-        # Reshape dt for broadcasting: (B,) -> (B, 1, 1)
-        dt_batch_reshaped = dt_batch.view(batch_size, 1, 1)
+        # Reshape dt for broadcasting: (B,) -> (B, 1, 1, 1) for 4D tensors
+        dt_batch_reshaped = dt_batch.view(-1, 1, 1, 1)
 
         # Euler step update: x_{t+1} = x_t + dt * v(x_t, t)
         img = img + dt_batch_reshaped * pred
 
     return img
+
+
+def denoise_cfg(
+    model: Flux,
+    # model input
+    img: Tensor,
+    img_ids: Tensor,
+    # guidance
+    txt: Tensor,
+    neg_txt: Tensor,
+    # guidance ID
+    txt_ids: Tensor,
+    neg_txt_ids: Tensor,
+    # mask
+    txt_mask: Tensor,
+    neg_txt_mask: Tensor,
+    clip_embedding: Tensor,
+    # sampling parameters
+    timesteps: list[float],
+    guidance: float = 4.0,
+    cfg: float = 2.0,
+    first_n_steps_without_cfg: int = 4,
+):
+    # this is ignored for schnell
+    guidance_vec = torch.full(
+        (img.shape[0],), guidance, device=img.device, dtype=img.dtype
+    )
+    step_count = 0
+    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+        t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+        
+        # disable cfg for x steps before using cfg
+        if step_count < first_n_steps_without_cfg or first_n_steps_without_cfg == -1 or cfg <= 1.0:
+            pred = model(
+                img=img,
+                img_ids=img_ids,
+                txt=txt,
+                txt_ids=txt_ids,
+                txt_mask=txt_mask,
+                timesteps=t_vec,
+                guidance=guidance_vec,
+                y=clip_embedding,
+            )
+            img = img.to(pred) + (t_prev - t_curr) * pred
+        else:
+            pred_pos = model(
+                img=torch.cat([img, img]),
+                img_ids=torch.cat([img_ids, img_ids]),
+                txt=torch.cat([txt, neg_txt]),
+                txt_ids=torch.cat([txt_ids, neg_txt_ids]),
+                txt_mask=torch.cat([txt_mask, neg_txt_mask]),
+                timesteps=torch.cat([t_vec, t_vec]),
+                guidance=torch.cat([guidance_vec, guidance_vec]),
+                y=torch.cat([clip_embedding, clip_embedding]),
+            )
+            pred_pos, pred_neg = pred_pos.chunk(2)
+            
+            pred_cfg = pred_neg + (pred_pos - pred_neg) * cfg
+
+            img = img + (t_prev - t_curr) * pred_cfg
+
+        step_count += 1
+
+    return img
+
+
+def denoise_cfg_batched_timesteps(
+    model: Flux,
+    # model input
+    img: Tensor,
+    img_ids: Tensor,
+    # guidance
+    txt: Tensor,
+    neg_txt: Tensor,
+    # guidance ID
+    txt_ids: Tensor,
+    neg_txt_ids: Tensor,
+    # mask
+    txt_mask: Tensor,
+    neg_txt_mask: Tensor,
+    clip_embedding: Tensor,
+    # sampling parameters
+    timesteps: Tensor,  # Shape: (B, N), where N is the number of time points
+    guidance: float = 0.0,
+    cfg: float = 2.0,
+    first_n_steps_without_cfg: int = 4,
+):
+    """
+    Performs ODE solving using the Euler method with Classifier-Free Guidance (CFG)
+    and potentially different timestep sequences for each sample in the batch.
+
+    Args:
+        model: The flow matching model.
+        img: Input tensor (e.g., noise) shape (B, C, H, W).
+        img_ids: Image IDs tensor, shape (B, ...).
+        txt: Positive text conditioning tensor, shape (B, L, D).
+        neg_txt: Negative text conditioning tensor, shape (B, L, D).
+        txt_ids: Positive text IDs tensor, shape (B, L).
+        neg_txt_ids: Negative text IDs tensor, shape (B, L).
+        txt_mask: Positive text mask tensor, shape (B, L).
+        neg_txt_mask: Negative text mask tensor, shape (B, L).
+        clip_embedding: CLIP text embedding tensor.
+        timesteps: Tensor containing the time points for each batch sample.
+                   Shape (B, N), where B is the batch size and N is the
+                   number of time points (e.g., [t_start, ..., t_end]).
+                   Time should generally decrease (e.g., [1.0, 0.8, ..., 0.0]).
+        guidance: Guidance strength passed to the model (potentially ignored).
+        cfg: Classifier-Free Guidance scale. A value of 1.0 disables CFG.
+        first_n_steps_without_cfg: The number of initial integration steps
+                                   (intervals) for which CFG will *not* be
+                                   applied, even if cfg > 1.0. Set to 0 to
+                                   apply CFG from the start, or -1 to always
+                                   apply CFG (if cfg > 1.0).
+    Returns:
+        Denoised image tensor, shape (B, C, H, W).
+    """
+    batch_size = img.shape[0]
+    num_time_points = timesteps.shape[1]
+    num_steps = num_time_points - 1  # Number of integration steps
+
+    # --- Input Validation ---
+    if timesteps.shape[0] != batch_size:
+        raise ValueError(
+            f"Batch size mismatch: img has {batch_size}, "
+            f"but timesteps has {timesteps.shape[0]}"
+        )
+    if timesteps.ndim != 2:
+        raise ValueError(
+            f"timesteps tensor must be 2D (B, N), but got shape {timesteps.shape}"
+        )
+    # Check consistency of conditioning tensors
+    for name, tensor in [
+        ("txt", txt),
+        ("neg_txt", neg_txt),
+        ("txt_ids", txt_ids),
+        ("neg_txt_ids", neg_txt_ids),
+        ("txt_mask", txt_mask),
+        ("neg_txt_mask", neg_txt_mask),
+        ("clip_embedding", clip_embedding),
+    ]:
+        if tensor.shape[0] != batch_size:
+            raise ValueError(
+                f"Batch size mismatch: img has {batch_size}, "
+                f"but {name} has {tensor.shape[0]}"
+            )
+    # --- End Validation ---
+
+    # Guidance vector (its effect depends on the model)
+    guidance_vec = torch.full(
+        (batch_size,), guidance, device=img.device, dtype=img.dtype
+    )
+
+    # Ensure timesteps tensor is on the same device and dtype as img
+    timesteps = timesteps.to(device=img.device, dtype=img.dtype)
+
+    # Iterate through the integration steps (intervals)
+    for i in range(num_steps):
+        # Get the current time for each batch element
+        t_curr_batch = timesteps[:, i]  # Shape: (B,)
+        # Get the next time for each batch element
+        t_next_batch = timesteps[:, i + 1]  # Shape: (B,)
+
+        # --- CFG Logic ---
+        # Determine if CFG should be applied in this step
+        apply_cfg = cfg > 1.0 and (
+            i >= first_n_steps_without_cfg or first_n_steps_without_cfg == -1
+        )
+
+        if apply_cfg:
+            # Duplicate inputs for CFG
+            img_double = torch.cat([img, img])
+            img_ids_double = torch.cat([img_ids, img_ids])
+            txt_double = torch.cat([txt, neg_txt])
+            txt_ids_double = torch.cat([txt_ids, neg_txt_ids])
+            txt_mask_double = torch.cat([txt_mask, neg_txt_mask])
+            t_curr_batch_double = torch.cat([t_curr_batch, t_curr_batch])
+            guidance_vec_double = torch.cat([guidance_vec, guidance_vec])
+            clip_embedding_double = torch.cat([clip_embedding, clip_embedding])
+            
+            # --- Combined Prediction ---
+            pred_combined = model(
+                img=img_double,
+                img_ids=img_ids_double,
+                txt=txt_double,
+                txt_ids=txt_ids_double,
+                txt_mask=txt_mask_double,
+                timesteps=t_curr_batch_double,
+                guidance=guidance_vec_double,
+                y=clip_embedding_double,
+            )
+            
+            pred_pos, pred_neg = pred_combined.chunk(2)
+            
+            # Combine predictions using CFG formula
+            pred_final = pred_neg + cfg * (pred_pos - pred_neg)
+        else:
+            # --- Positive Prediction Only ---
+            pred_final = model(
+                img=img,
+                img_ids=img_ids,
+                txt=txt,
+                txt_ids=txt_ids,
+                txt_mask=txt_mask,
+                timesteps=t_curr_batch,
+                guidance=guidance_vec,
+                y=clip_embedding,
+            )
+        # --- End CFG Logic ---
+
+        # Calculate the step size (dt) for each batch element
+        dt_batch = t_next_batch - t_curr_batch  # Shape: (B,)
+
+        # Reshape dt for broadcasting: (B,) -> (B, 1, 1, 1) for 4D tensors
+        dt_batch_reshaped = dt_batch.view(-1, 1, 1, 1)
+
+        # Euler step update: x_{t+1} = x_t + dt * v(x_t, t)
+        img = img.to(pred_final) + dt_batch_reshaped * pred_final
+
+    return img
+
+
+def unpack(x: Tensor, height: int, width: int) -> Tensor:
+    return rearrange(
+        x,
+        "b (h w) (c ph pw) -> b c (h ph) (w pw)",
+        h=math.ceil(height / 16),
+        w=math.ceil(width / 16),
+        ph=2,
+        pw=2,
+    )
