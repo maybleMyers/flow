@@ -45,6 +45,7 @@ class TextImageDataset(Dataset):
         num_gpus=1,
         timeout=10,
         thread_per_worker=100,
+        dummy_image=False
     ):
         # coarsened dataset, the batch is handled by the dataset and not the dataloader,
         # increase dataloader prefetch so this thing  run optimally!
@@ -63,6 +64,7 @@ class TextImageDataset(Dataset):
         self.rank = rank
         self.rank_batch_size = batch_size // num_gpus
         self.timeout = timeout
+        self.dummy_image = dummy_image
         assert (
             batch_size % num_gpus
         ) == 0, "batch size is not divisible by the number of GPUs!"
@@ -267,20 +269,21 @@ class TextImageDataset(Dataset):
     def __getitem__(self, index):
         batch = self.batches[index]  # the batches is already batched and it's a list
 
-        # Use threading for concurrent image loading
-        raw_images = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [
-                executor.submit(
-                    self._load_image,
-                    sample,
-                    self.session,
-                    self.image_folder_path,
-                    self.timeout,
-                )
-                for sample in batch
-            ]
-            raw_images = [future.result() for future in futures]
+        if not self.dummy_image:
+            # Use threading for concurrent image loading
+            raw_images = []
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = [
+                    executor.submit(
+                        self._load_image,
+                        sample,
+                        self.session,
+                        self.image_folder_path,
+                        self.timeout,
+                    )
+                    for sample in batch
+                ]
+                raw_images = [future.result() for future in futures]
 
         images = []
         training_prompts = []
@@ -290,13 +293,14 @@ class TextImageDataset(Dataset):
             try:
 
                 standard_width, standard_height = sample["bucket"]
-
-                image = self.scale_and_crop_long_axis(
-                    raw_images[i], standard_height, standard_width
-                )
-                image = self.image_transforms(image)
-                images.append(image)
-
+                if not self.dummy_image:
+                    image = self.scale_and_crop_long_axis(
+                        raw_images[i], standard_height, standard_width
+                    )
+                    image = self.image_transforms(image)
+                    images.append(image)
+                else:
+                    images.append(torch.zeros(3, standard_height, standard_width))
                 # unconditional drop out
                 tmp = random.random()
                 if tmp >= 1 - self.uncond_percentage:
