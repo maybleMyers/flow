@@ -423,7 +423,7 @@ def inference_wrapper(
                 truncation=True,
                 return_tensors="pt",
             ).to(clip.device)
-            clip_embed = clip(clip_inputs.input_ids).pooler_output.to(rank)
+            clip_embed = clip(clip_inputs.input_ids).pooler_output.to(rank) * 0
 
             clip_inputs_neg = clip_tokenizer(
                 [""],
@@ -432,7 +432,7 @@ def inference_wrapper(
                 truncation=True,
                 return_tensors="pt",
             ).to(clip.device)
-            clip_embed_neg = clip(clip_inputs_neg.input_ids).pooler_output.to(rank)
+            clip_embed_neg = clip(clip_inputs_neg.input_ids).pooler_output.to(rank) * 0
             clip.to("cpu")
 
 
@@ -623,6 +623,14 @@ def train_flux(rank, world_size, debug=False, json_config="training_config_flux.
                     + ["txt_in", "img_in", "final_layer"]
                 )
 
+                omit_keys = ["modulation", "txt_mod", "img_mod", "vector_in", "guidance_in"]
+                # Filter out modulation because those layers can explode due to fan in
+                trained_layer_keywords = [
+                    k for k in trained_layer_keywords if k not in omit_keys
+                ]
+
+                [print("trained_parameters", x) for x in trained_layer_keywords]
+
                 # remove hooks and load the new hooks
                 if len(hooks) != 0:
                     hooks = [hook.remove() for hook in hooks]
@@ -803,7 +811,7 @@ def train_flux(rank, world_size, debug=False, json_config="training_config_flux.
                         # Added clip embedding
                         y=acc_clip_embeddings[tmb_i * mb : tmb_i * mb + mb].to(
                             rank, non_blocking=True
-                        ),
+                        ) * 0,
                         timesteps=input_timestep[tmb_i * mb : tmb_i * mb + mb].to(
                             rank, non_blocking=True
                         ),
