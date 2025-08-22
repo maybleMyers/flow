@@ -14,6 +14,7 @@ from .module.layers import (
     distribute_modulations,
     NerfEmbedder,
     NerfFinalLayer,
+    NerfFinalLayerConv,
     NerfGLUBlock
 )
 
@@ -191,7 +192,12 @@ class Chroma(nn.Module):
                 use_compiled=params._use_compiled
             ) for _ in range(params.nerf_depth)
         ])
-        self.nerf_final_layer = NerfFinalLayer(
+        # self.nerf_final_layer = NerfFinalLayer(
+        #     params.nerf_hidden_size,
+        #     out_channels=params.in_channels,
+        #     use_compiled=params._use_compiled
+        # )
+        self.nerf_final_layer_conv = NerfFinalLayerConv(
             params.nerf_hidden_size,
             out_channels=params.in_channels,
             use_compiled=params._use_compiled
@@ -348,7 +354,8 @@ class Chroma(nn.Module):
                 img_dct = block(img_dct, nerf_hidden)
 
         # final projection to get the output pixel values
-        img_dct = self.nerf_final_layer(img_dct) # -> [B*NumPatches, P*P, C]
+        # img_dct = self.nerf_final_layer(img_dct) # -> [B*NumPatches, P*P, C]
+        img_dct = self.nerf_final_layer_conv.norm(img_dct)
         
         # gemini gogogo idk how to fold this properly :P
         # Reassemble the patches into the final image.
@@ -361,6 +368,7 @@ class Chroma(nn.Module):
             output_size=(H, W),
             kernel_size=self.params.patch_size,
             stride=self.params.patch_size
-        )
+        ) # [B, Hidden, H, W]
+        img_dct = self.nerf_final_layer_conv.conv(img_dct)
 
         return img_dct
