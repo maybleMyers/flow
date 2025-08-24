@@ -200,33 +200,18 @@ def load_models(args):
     del state_dict
     torch.cuda.empty_cache()
     
-    # T5 loading strategy: Start on CPU for memory efficiency, move to GPU during encoding
-    if args.cpu_offload and not args.force_cpu_t5:
-        t5_storage_device = "cpu"  # Where T5 lives when not in use
-        t5_work_device = args.device  # Where T5 goes for encoding
-        print("T5 will use just-in-time GPU loading (CPU storage, GPU encoding)")
-    elif args.force_cpu_t5:
-        t5_storage_device = "cpu"
-        t5_work_device = "cpu"
-        print("T5 will stay on CPU permanently")
-    else:
-        t5_storage_device = args.device
-        t5_work_device = args.device
-        print(f"T5 will stay on GPU ({args.device})")
+    # Simple T5 loading: will be used immediately then unloaded
+    t5_device = "cpu" if args.force_cpu_t5 else args.device
+    t5_model.to(t5_device).eval()
     
-    # Load T5 to storage device initially
-    t5_model.to(t5_storage_device).eval()
-    
-    # Apply quantization on storage device
+    # Apply quantization on target device
     if args.use_8bit_t5:
-        print(f"Quantizing T5 to 8-bit on {t5_storage_device}...")
+        print(f"Quantizing T5 to 8-bit on {t5_device}...")
         lora_and_quant.swap_linear_recursive(
-            t5_model, lora_and_quant.Quantized8bitLinear, device=t5_storage_device
+            t5_model, lora_and_quant.Quantized8bitLinear, device=t5_device
         )
     
-    # Store the device strategy in the model for inference use
-    t5_model._storage_device = t5_storage_device
-    t5_model._work_device = t5_work_device
+    print(f"T5 loaded on {t5_device} - will be used for encoding then unloaded")
     
     return model, t5_model, tokenizer
 
@@ -258,24 +243,9 @@ def run_inference(model, t5_model, tokenizer, args):
             # Get sampling schedule
             timesteps = get_schedule(args.steps, 3)  # Use channel dimension like training
             
-            # Just-in-time T5 loading: Move T5 to work device if needed
-            t5_storage_device = getattr(t5_model, '_storage_device', 'cpu')
-            t5_work_device = getattr(t5_model, '_work_device', args.device)
-            
-            current_t5_device = next(t5_model.parameters()).device
-            need_t5_movement = (t5_work_device != t5_storage_device)
-            
-            if need_t5_movement:
-                print(f"Moving T5 from {current_t5_device} to {t5_work_device} for encoding...")
-                import time
-                move_start = time.perf_counter()
-                t5_model.to(t5_work_device)
-                torch.cuda.empty_cache()
-                move_time = time.perf_counter() - move_start
-                print(f"T5 movement took {move_time:.2f}s")
-            
+            # T5 encoding - will be unloaded completely after this step
             t5_device = next(t5_model.parameters()).device
-            print(f"T5 encoding on device: {t5_device}")
+            print(f"Encoding text prompts with T5 on {t5_device}...")
             
             text_input = tokenizer(
                 [args.prompt] * args.batch_size,
@@ -325,27 +295,35 @@ def run_inference(model, t5_model, tokenizer, args):
             # Move embeddings to main device for model inference
             neg_embed = neg_embed.to(args.device)
             
-            # Store attention masks before cleaning up inputs
-            pos_attention_mask = text_input['attention_mask'].to(args.device)
-            neg_attention_mask = neg_input['attention_mask'].to(args.device)
+            # Store attention masks
+            pos_attention_mask = text_input['attention_mask']
+            neg_attention_mask = neg_input['attention_mask']
             
-            # Move T5 back to storage device to free GPU memory
-            if need_t5_movement:
-                print(f"Moving T5 back to {t5_storage_device} to free GPU memory...")
-                move_start = time.perf_counter()
-                t5_model.to(t5_storage_device)
-                torch.cuda.empty_cache()
-                move_time = time.perf_counter() - move_start
-                print(f"T5 offload took {move_time:.2f}s - GPU memory freed for main model inference")
-                
-                # Show memory freed
-                if args.show_memory_stats:
-                    free_mem, total_mem = torch.cuda.mem_get_info()
-                    print(f"GPU memory after T5 offload: {(total_mem - free_mem) / (1024**3):.2f}GB / {total_mem / (1024**3):.2f}GB")
+            # Store text embeddings in CPU memory
+            text_embed = text_embed.to('cpu')
+            neg_embed = neg_embed.to('cpu')
+            pos_attention_mask = pos_attention_mask.to('cpu')
+            neg_attention_mask = neg_attention_mask.to('cpu')
             
-            # Clean up T5 related variables
+            # COMPLETELY UNLOAD T5 from GPU to free memory for main model
+            print("Completely unloading T5 from GPU memory...")
+            del t5_model, tokenizer
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            
+            # Show memory freed
+            if args.show_memory_stats:
+                free_mem, total_mem = torch.cuda.mem_get_info()
+                print(f"GPU memory after T5 unload: {(total_mem - free_mem) / (1024**3):.2f}GB / {total_mem / (1024**3):.2f}GB")
+            
+            # Move embeddings back to main device for model inference  
+            text_embed = text_embed.to(args.device)
+            neg_embed = neg_embed.to(args.device)
+            pos_attention_mask = pos_attention_mask.to(args.device)
+            neg_attention_mask = neg_attention_mask.to(args.device)
+            
+            # Clean up input variables
             del text_input, neg_input
-            torch.cuda.empty_cache()  # Always safe to call
             
             # Text position IDs (dummy)
             text_ids = torch.zeros((args.batch_size, args.t5_max_length, 3), device=args.device)
