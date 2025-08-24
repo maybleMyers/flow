@@ -349,6 +349,38 @@ class NerfFinalLayer(nn.Module):
         return x
 
 
+class NerfFinalLayerConv(nn.Module):
+    def __init__(self, hidden_size, out_channels, use_compiled):
+        super().__init__()
+        self.norm = RMSNorm(hidden_size, use_compiled=use_compiled)
+
+        # replace nn.Linear with nn.Conv2d since linear is just pointwise conv
+        self.conv = nn.Conv2d(
+            in_channels=hidden_size,
+            out_channels=out_channels,
+            kernel_size=3,
+            padding=1
+        )
+        nn.init.zeros_(self.conv.weight)
+        nn.init.zeros_(self.conv.bias)
+
+    def forward(self, x):
+        # shape: [N, C, H, W] !
+        # RMSNorm normalizes over the last dimension, but our channel dim (C) is at dim=1.
+        # So, we permute the dimensions to make the channel dimension the last one.
+        x_permuted = x.permute(0, 2, 3, 1)  # Shape becomes [N, H, W, C]
+
+        # Apply normalization on the feature/channel dimension
+        x_norm = self.norm(x_permuted)
+
+        # Permute back to the original dimension order for the convolution
+        x_norm_permuted = x_norm.permute(0, 3, 1, 2) # Shape becomes [N, C, H, W]
+
+        # Apply the 3x3 convolution
+        x = self.conv(x_norm_permuted)
+        return x
+
+
 class Approximator(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: int, n_layers=4):
         super().__init__()
