@@ -35,7 +35,7 @@ def parse_args():
     
     # Model paths
     parser.add_argument("--model_path", required=True, 
-                       help="Path to the ChromaRadiance model (.safetensors)")
+                       help="Path to the ChromaRadiance model (.safetensors or .pth)")
     parser.add_argument("--t5_path", required=True,
                        help="Path to T5 model directory")
     parser.add_argument("--t5_config", required=True,
@@ -97,7 +97,14 @@ def load_models(args):
     with torch.device("meta"):
         model = Chroma(chroma_params)
     
-    state_dict = load_safetensors(args.model_path)
+    # Load model weights - support both .safetensors and .pth formats
+    if args.model_path.endswith('.safetensors'):
+        state_dict = load_safetensors(args.model_path)
+    elif args.model_path.endswith('.pth'):
+        state_dict = torch.load(args.model_path, map_location='cpu')
+    else:
+        raise ValueError(f"Unsupported model format. Expected .safetensors or .pth, got: {args.model_path}")
+    
     model.load_state_dict(state_dict, assign=True)
     
     model.to(args.device).eval()
