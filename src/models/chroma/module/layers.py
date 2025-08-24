@@ -379,7 +379,7 @@ class NerfFinalLayerConv(nn.Module):
         # Apply the 3x3 convolution
         x = self.conv(x_norm_permuted)
         return x
-
+    
 
 class Approximator(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: int, n_layers=4):
