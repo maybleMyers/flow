@@ -179,8 +179,7 @@ def run_inference(model, t5_model, tokenizer, args):
             image_ids = prepare_latent_image_ids(args.batch_size, args.height, args.width, patch_size=16).to(args.device)
             
             # Get sampling schedule
-            num_patches = (args.height // 16) * (args.width // 16)
-            timesteps = get_schedule(args.steps, num_patches)
+            timesteps = get_schedule(args.steps, 3)  # Use channel dimension like training
             
             # Handle T5 encoding with potential CPU offloading
             if args.cpu_offload:
