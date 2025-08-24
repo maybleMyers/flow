@@ -258,16 +258,27 @@ def run_inference(model, t5_model, tokenizer, args):
                 torch.cuda.empty_cache()
             
             # Encode positive prompt (repeat for batch)
-            t5_device = t5_model.device
+            t5_device = next(t5_model.parameters()).device
+            print(f"T5 model is on device: {t5_device}")
+            
             text_input = tokenizer(
                 [args.prompt] * args.batch_size,
                 padding="max_length",
                 max_length=args.t5_max_length,
                 truncation=True,
                 return_tensors="pt"
-            ).to(t5_device)
+            )
             
-            text_embed = t5_model(text_input.input_ids, text_input.attention_mask).to(args.device)
+            # Move input tensors to T5 device
+            text_input = {k: v.to(t5_device) for k, v in text_input.items()}
+            
+            # Run T5 encoding on appropriate device
+            with torch.autocast(device_type=t5_device.type if t5_device.type != 'cpu' else 'cpu', 
+                               dtype=torch.bfloat16, enabled=(t5_device.type != 'cpu')):
+                text_embed = t5_model(text_input['input_ids'], text_input['attention_mask'])
+            
+            # Move embeddings to main device for model inference
+            text_embed = text_embed.to(args.device)
             
             # Encode negative prompt (repeat for batch)
             neg_prompt = args.negative_prompt if args.negative_prompt else ""
@@ -277,15 +288,30 @@ def run_inference(model, t5_model, tokenizer, args):
                 max_length=args.t5_max_length,
                 truncation=True,
                 return_tensors="pt"
-            ).to(t5_device)
+            )
             
-            neg_embed = t5_model(neg_input.input_ids, neg_input.attention_mask).to(args.device)
+            # Move input tensors to T5 device
+            neg_input = {k: v.to(t5_device) for k, v in neg_input.items()}
+            
+            # Run T5 encoding on appropriate device
+            with torch.autocast(device_type=t5_device.type if t5_device.type != 'cpu' else 'cpu', 
+                               dtype=torch.bfloat16, enabled=(t5_device.type != 'cpu')):
+                neg_embed = t5_model(neg_input['input_ids'], neg_input['attention_mask'])
+            
+            # Move embeddings to main device for model inference
+            neg_embed = neg_embed.to(args.device)
+            
+            # Store attention masks before cleaning up inputs
+            pos_attention_mask = text_input['attention_mask'].to(args.device)
+            neg_attention_mask = neg_input['attention_mask'].to(args.device)
             
             # Move T5 back to CPU if offloading enabled (but not if forced to stay on CPU)
             if args.cpu_offload and not args.force_cpu_t5:
                 t5_model.to("cpu")
-                # Clean up T5 related variables
-                del text_input, neg_input
+            
+            # Clean up T5 related variables
+            del text_input, neg_input
+            if t5_device.type == 'cuda':
                 torch.cuda.empty_cache()
             
             # Text position IDs (dummy)
@@ -294,10 +320,6 @@ def run_inference(model, t5_model, tokenizer, args):
 
             # Run denoising
             print(f"Running {args.steps} denoising steps...")
-            
-            # Store attention masks before cleaning up inputs
-            pos_attention_mask = text_embed.new_ones(args.batch_size, args.t5_max_length) if args.cpu_offload else text_input.attention_mask
-            neg_attention_mask = text_embed.new_ones(args.batch_size, args.t5_max_length) if args.cpu_offload else neg_input.attention_mask
             
             output = denoise_cfg(
                 model, noise, image_ids,
@@ -310,8 +332,6 @@ def run_inference(model, t5_model, tokenizer, args):
             # Clean up memory after inference
             del text_embed, neg_embed, noise, image_ids, text_ids
             del pos_attention_mask, neg_attention_mask
-            if not args.cpu_offload:
-                del text_input, neg_input
             
             # Ultra aggressive cleanup for ultra low VRAM mode
             if args.ultra_low_vram:
