@@ -78,6 +78,8 @@ def parse_args():
                        help="Offload T5 to CPU during generation to save VRAM")
     parser.add_argument("--low_vram", action="store_true",
                        help="Enable all low VRAM optimizations (8bit T5 + CPU offload)")
+    parser.add_argument("--ultra_low_vram", action="store_true",
+                       help="Enable ultra low VRAM mode (aggressive memory cleanup + smaller batch processing)")
     
     
     return parser.parse_args()
@@ -86,7 +88,12 @@ def load_models(args):
     """Load ChromaRadiance and T5 models."""
     
     # Apply low VRAM optimizations
-    if args.low_vram:
+    if args.ultra_low_vram:
+        args.use_8bit_t5 = True
+        args.cpu_offload = True
+        args.low_vram = True
+        print("Ultra low VRAM mode enabled: 8-bit T5 + CPU offloading + aggressive cleanup")
+    elif args.low_vram:
         args.use_8bit_t5 = True
         args.cpu_offload = True
         print("Low VRAM mode enabled: 8-bit T5 + CPU offloading")
@@ -107,6 +114,10 @@ def load_models(args):
     
     model.load_state_dict(state_dict, assign=True)
     
+    # Clean up state dict to free memory
+    del state_dict
+    torch.cuda.empty_cache()
+    
     model.to(args.device).eval()
     
     print("Loading T5 text encoder...")
@@ -121,6 +132,10 @@ def load_models(args):
     
     state_dict = replace_keys(load_file_multipart(args.t5_path))
     t5_model.load_state_dict(state_dict, assign=True)
+    
+    # Clean up T5 state dict to free memory
+    del state_dict
+    torch.cuda.empty_cache()
     
     # Apply memory optimizations
     if args.use_8bit_t5:
@@ -200,6 +215,8 @@ def run_inference(model, t5_model, tokenizer, args):
             # Move T5 back to CPU if offloading enabled
             if args.cpu_offload:
                 t5_model.to("cpu")
+                # Clean up T5 related variables
+                del text_input, neg_input
                 torch.cuda.empty_cache()
             
             # Text position IDs (dummy)
@@ -208,13 +225,34 @@ def run_inference(model, t5_model, tokenizer, args):
 
             # Run denoising
             print(f"Running {args.steps} denoising steps...")
+            
+            # Store attention masks before cleaning up inputs
+            pos_attention_mask = text_embed.new_ones(args.batch_size, args.t5_max_length) if args.cpu_offload else text_input.attention_mask
+            neg_attention_mask = text_embed.new_ones(args.batch_size, args.t5_max_length) if args.cpu_offload else neg_input.attention_mask
+            
             output = denoise_cfg(
                 model, noise, image_ids,
                 text_embed, neg_embed, text_ids, text_ids,
-                text_input.attention_mask, neg_input.attention_mask,
+                pos_attention_mask, neg_attention_mask,
                 timesteps, guidance=args.guidance, cfg=args.cfg, 
                 first_n_steps_without_cfg=args.first_n_steps_without_cfg
             )
+            
+            # Clean up memory after inference
+            del text_embed, neg_embed, noise, image_ids, text_ids
+            del pos_attention_mask, neg_attention_mask
+            if not args.cpu_offload:
+                del text_input, neg_input
+            
+            # Ultra aggressive cleanup for ultra low VRAM mode
+            if args.ultra_low_vram:
+                # Force garbage collection and empty cache multiple times
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            else:
+                torch.cuda.empty_cache()
             
             # Convert from [-1,1] to [0,1] and save
             images = output.clamp(-1, 1).add(1).div(2)
