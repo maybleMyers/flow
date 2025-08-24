@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-ChromaRadiance Inference Script
+ChromaRadiance Inference Script with Smart Offloading
 
 Usage:
     python run_inference.py --model_path path/to/model.safetensors --prompt "your prompt here"
     
-Example:
+Example (Basic):
     python run_inference.py \
         --model_path "C:/forge/testing/models/Stable-diffusion/2025-08-23_06-10-39.safetensors" \
         --t5_path "models/flux/text_encoder_2" \
@@ -17,6 +17,20 @@ Example:
         --guidance 3.0 \
         --cfg 2.0 \
         --seed 42
+
+Example (Low VRAM):
+    python run_inference.py \
+        --model_path "model.safetensors" \
+        --t5_path "text_encoder" --t5_config "config.json" --t5_tokenizer "tokenizer" \
+        --prompt "a beautiful landscape" \
+        --low_vram --offload_strategy aggressive --show_memory_stats
+
+Example (Ultra Low VRAM - 6GB or less):
+    python run_inference.py \
+        --model_path "model.safetensors" \
+        --t5_path "text_encoder" --t5_config "config.json" --t5_tokenizer "tokenizer" \
+        --prompt "a beautiful landscape" \
+        --ultra_low_vram --show_memory_stats
 """
 
 import argparse
@@ -27,6 +41,7 @@ from src.models.chroma.model_dct import Chroma, chroma_params
 from src.models.chroma.sampling import get_schedule, denoise_cfg
 from src.models.chroma.utils import prepare_latent_image_ids
 from src.models.chroma.module.t5 import T5EncoderModel, T5Config, replace_keys
+from src.models.chroma.offloading_wrapper import apply_smart_offloading
 from src.general_utils import load_file_multipart, load_safetensors
 import src.lora_and_quant as lora_and_quant
 
@@ -81,6 +96,19 @@ def parse_args():
     parser.add_argument("--ultra_low_vram", action="store_true",
                        help="Enable ultra low VRAM mode (aggressive memory cleanup + smaller batch processing)")
     
+    # Advanced offloading options
+    parser.add_argument("--auto_offload", action="store_true",
+                       help="Enable automatic smart offloading based on VRAM detection")
+    parser.add_argument("--offload_strategy", type=str, default="auto",
+                       choices=["auto", "conservative", "aggressive", "ultra"],
+                       help="Offloading strategy: auto (default), conservative, aggressive, or ultra")
+    parser.add_argument("--disable_offloading", action="store_true",
+                       help="Disable all offloading (keep everything on GPU)")
+    parser.add_argument("--memory_target_gb", type=float, default=None,
+                       help="Target VRAM usage in GB (experimental)")
+    parser.add_argument("--show_memory_stats", action="store_true",
+                       help="Show detailed memory usage statistics")
+    
     
     return parser.parse_args()
 
@@ -92,11 +120,21 @@ def load_models(args):
         args.use_8bit_t5 = True
         args.cpu_offload = True
         args.low_vram = True
-        print("Ultra low VRAM mode enabled: 8-bit T5 + CPU offloading + aggressive cleanup")
+        args.auto_offload = True
+        if args.offload_strategy == "auto":
+            args.offload_strategy = "ultra"
+        print("Ultra low VRAM mode enabled: 8-bit T5 + CPU offloading + aggressive cleanup + ultra offloading")
     elif args.low_vram:
         args.use_8bit_t5 = True
         args.cpu_offload = True
-        print("Low VRAM mode enabled: 8-bit T5 + CPU offloading")
+        args.auto_offload = True
+        if args.offload_strategy == "auto":
+            args.offload_strategy = "aggressive"
+        print("Low VRAM mode enabled: 8-bit T5 + CPU offloading + aggressive offloading")
+    
+    # Enable auto offload by default for reasonable VRAM savings
+    if not args.disable_offloading and not hasattr(args, 'auto_offload'):
+        args.auto_offload = True
     
     print("Loading ChromaRadiance model...")
     
@@ -119,6 +157,13 @@ def load_models(args):
     torch.cuda.empty_cache()
     
     model.to(args.device).eval()
+    
+    # Apply smart offloading if enabled
+    if args.auto_offload and not args.disable_offloading:
+        print(f"Applying smart offloading with strategy: {args.offload_strategy}")
+        model = apply_smart_offloading(model, torch.device(args.device), args.offload_strategy)
+        if args.show_memory_stats:
+            model.memory_manager.print_memory_summary()
     
     print("Loading T5 text encoder...")
     
@@ -252,6 +297,11 @@ def run_inference(model, t5_model, tokenizer, args):
                 torch.cuda.synchronize()
             else:
                 torch.cuda.empty_cache()
+                
+            # Show performance stats if smart offloading was used
+            if hasattr(model, 'print_performance_summary'):
+                if args.show_memory_stats:
+                    model.print_performance_summary()
             
             # Convert from [-1,1] to [0,1] and save
             images = output.clamp(-1, 1).add(1).div(2)
@@ -301,6 +351,11 @@ def main():
     
     
     print("Inference complete!")
+    
+    # Show final memory summary if requested
+    if args.show_memory_stats and hasattr(model, 'memory_manager'):
+        print("\nFinal Memory Summary:")
+        model.memory_manager.print_memory_summary()
 
 if __name__ == "__main__":
     main()
