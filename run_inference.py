@@ -200,26 +200,22 @@ def load_models(args):
     del state_dict
     torch.cuda.empty_cache()
     
-    # Start T5 on CPU if offloading enabled (do this BEFORE moving to GPU)
-    if args.cpu_offload:
-        print("T5 will be offloaded to CPU during generation")
-        t5_model.to("cpu").eval()
-        
-        # Apply 8-bit quantization on CPU if enabled
-        if args.use_8bit_t5:
-            print("Quantizing T5 to 8-bit on CPU...")
-            lora_and_quant.swap_linear_recursive(
-                t5_model, lora_and_quant.Quantized8bitLinear, device="cpu"
-            )
+    # Determine T5 target device
+    if args.cpu_offload or args.force_cpu_t5:
+        t5_target_device = "cpu"
+        print("T5 will stay on CPU for memory efficiency")
     else:
-        # Apply memory optimizations
-        if args.use_8bit_t5:
-            print("Quantizing T5 to 8-bit...")
-            lora_and_quant.swap_linear_recursive(
-                t5_model, lora_and_quant.Quantized8bitLinear, device=args.device
-            )
-        
-        t5_model.to(args.device).eval()
+        t5_target_device = args.device
+        print(f"T5 will be loaded to {t5_target_device}")
+    
+    # Move T5 to target device and apply quantization
+    t5_model.to(t5_target_device).eval()
+    
+    if args.use_8bit_t5:
+        print(f"Quantizing T5 to 8-bit on {t5_target_device}...")
+        lora_and_quant.swap_linear_recursive(
+            t5_model, lora_and_quant.Quantized8bitLinear, device=t5_target_device
+        )
     
     return model, t5_model, tokenizer
 
@@ -251,11 +247,7 @@ def run_inference(model, t5_model, tokenizer, args):
             # Get sampling schedule
             timesteps = get_schedule(args.steps, 3)  # Use channel dimension like training
             
-            # Handle T5 encoding with potential CPU offloading
-            if args.cpu_offload and not args.force_cpu_t5:
-                # Move T5 to GPU temporarily for encoding
-                t5_model.to(args.device)
-                torch.cuda.empty_cache()
+            # T5 is already on the correct device (determined during loading)
             
             # Encode positive prompt (repeat for batch)
             t5_device = next(t5_model.parameters()).device
@@ -305,9 +297,7 @@ def run_inference(model, t5_model, tokenizer, args):
             pos_attention_mask = text_input['attention_mask'].to(args.device)
             neg_attention_mask = neg_input['attention_mask'].to(args.device)
             
-            # Move T5 back to CPU if offloading enabled (but not if forced to stay on CPU)
-            if args.cpu_offload and not args.force_cpu_t5:
-                t5_model.to("cpu")
+            # T5 stays on its assigned device (no movement needed)
             
             # Clean up T5 related variables
             del text_input, neg_input
