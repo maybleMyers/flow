@@ -108,6 +108,8 @@ def parse_args():
                        help="Target VRAM usage in GB (experimental)")
     parser.add_argument("--show_memory_stats", action="store_true",
                        help="Show detailed memory usage statistics")
+    parser.add_argument("--force_cpu_t5", action="store_true",
+                       help="Force T5 to stay on CPU throughout inference (saves VRAM)")
     
     
     return parser.parse_args()
@@ -115,10 +117,26 @@ def parse_args():
 def load_models(args):
     """Load ChromaRadiance and T5 models."""
     
+    # Clear any existing CUDA cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+        # Check available memory before starting
+        free_mem, total_mem = torch.cuda.mem_get_info()
+        print(f"Available GPU memory before loading: {free_mem / (1024**3):.2f}GB / {total_mem / (1024**3):.2f}GB")
+        
+        if free_mem < 1024**3:  # Less than 1GB free
+            print("WARNING: Very low GPU memory available. Consider:")
+            print("  1. Restarting your Python session")
+            print("  2. Freeing other GPU processes") 
+            print("  3. Using --cpu_offload flag")
+    
     # Apply low VRAM optimizations
     if args.ultra_low_vram:
         args.use_8bit_t5 = True
         args.cpu_offload = True
+        args.force_cpu_t5 = True  # Force T5 to stay on CPU
         args.low_vram = True
         args.auto_offload = True
         if args.offload_strategy == "auto":
@@ -182,18 +200,25 @@ def load_models(args):
     del state_dict
     torch.cuda.empty_cache()
     
-    # Apply memory optimizations
-    if args.use_8bit_t5:
-        print("Quantizing T5 to 8-bit...")
-        lora_and_quant.swap_linear_recursive(
-            t5_model, lora_and_quant.Quantized8bitLinear, device=args.device
-        )
-    
-    # Start T5 on CPU if offloading enabled
+    # Start T5 on CPU if offloading enabled (do this BEFORE moving to GPU)
     if args.cpu_offload:
         print("T5 will be offloaded to CPU during generation")
         t5_model.to("cpu").eval()
+        
+        # Apply 8-bit quantization on CPU if enabled
+        if args.use_8bit_t5:
+            print("Quantizing T5 to 8-bit on CPU...")
+            lora_and_quant.swap_linear_recursive(
+                t5_model, lora_and_quant.Quantized8bitLinear, device="cpu"
+            )
     else:
+        # Apply memory optimizations
+        if args.use_8bit_t5:
+            print("Quantizing T5 to 8-bit...")
+            lora_and_quant.swap_linear_recursive(
+                t5_model, lora_and_quant.Quantized8bitLinear, device=args.device
+            )
+        
         t5_model.to(args.device).eval()
     
     return model, t5_model, tokenizer
@@ -227,7 +252,7 @@ def run_inference(model, t5_model, tokenizer, args):
             timesteps = get_schedule(args.steps, 3)  # Use channel dimension like training
             
             # Handle T5 encoding with potential CPU offloading
-            if args.cpu_offload:
+            if args.cpu_offload and not args.force_cpu_t5:
                 # Move T5 to GPU temporarily for encoding
                 t5_model.to(args.device)
                 torch.cuda.empty_cache()
@@ -256,8 +281,8 @@ def run_inference(model, t5_model, tokenizer, args):
             
             neg_embed = t5_model(neg_input.input_ids, neg_input.attention_mask).to(args.device)
             
-            # Move T5 back to CPU if offloading enabled
-            if args.cpu_offload:
+            # Move T5 back to CPU if offloading enabled (but not if forced to stay on CPU)
+            if args.cpu_offload and not args.force_cpu_t5:
                 t5_model.to("cpu")
                 # Clean up T5 related variables
                 del text_input, neg_input
