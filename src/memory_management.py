@@ -121,10 +121,16 @@ class MemoryManager:
     def move_to_device(self, model: torch.nn.Module, device: torch.device, 
                       component_name: str = "model") -> torch.nn.Module:
         """Move model to device with memory tracking"""
-        if model.device == device:
+        try:
+            current_device = next(model.parameters()).device
+        except StopIteration:
+            # No parameters, assume CPU
+            current_device = torch.device('cpu')
+            
+        if current_device == device:
             return model
             
-        print(f"Moving {component_name} from {model.device} to {device}")
+        print(f"Moving {component_name} from {current_device} to {device}")
         
         # Move model
         model = model.to(device)
@@ -210,26 +216,34 @@ class ChromaComponentManager:
         """Analyze model components and their memory usage"""
         print("Analyzing Chroma model components...")
         
+        # Helper function to get device safely
+        def get_component_device(component):
+            try:
+                return next(component.parameters()).device
+            except StopIteration:
+                # No parameters, assume it's on the same device as the model
+                return next(self.model.parameters()).device
+        
         # Analyze double blocks
         for i, block in enumerate(self.model.double_blocks):
             name = f"double_block_{i}"
             size = self.memory_manager.estimate_model_memory(block)
             self.component_sizes[name] = size
-            self.component_locations[name] = block.device
+            self.component_locations[name] = get_component_device(block)
             
         # Analyze single blocks  
         for i, block in enumerate(self.model.single_blocks):
             name = f"single_block_{i}"
             size = self.memory_manager.estimate_model_memory(block)
             self.component_sizes[name] = size
-            self.component_locations[name] = block.device
+            self.component_locations[name] = get_component_device(block)
             
         # Analyze nerf blocks
         for i, block in enumerate(self.model.nerf_blocks):
             name = f"nerf_block_{i}"
             size = self.memory_manager.estimate_model_memory(block)
             self.component_sizes[name] = size
-            self.component_locations[name] = block.device
+            self.component_locations[name] = get_component_device(block)
             
         # Analyze other components
         components = [
@@ -244,7 +258,7 @@ class ChromaComponentManager:
         for name, component in components:
             size = self.memory_manager.estimate_model_memory(component)
             self.component_sizes[name] = size
-            self.component_locations[name] = component.device
+            self.component_locations[name] = get_component_device(component)
         
         # Print analysis
         total_size_mb = sum(self.component_sizes.values()) / (1024**2)
