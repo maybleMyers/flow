@@ -283,7 +283,8 @@ class Chroma(nn.Module):
             )
             # then and only then we could concatenate it together
             input_vec = torch.cat([timestep_guidance, modulation_index], dim=-1)
-            mod_vectors = self.distilled_guidance_layer(input_vec.requires_grad_(True))
+            input_vec = input_vec.to(img.dtype)
+            mod_vectors = self.distilled_guidance_layer(input_vec)
         mod_vectors_dict = distribute_modulations(mod_vectors, self.depth_single_blocks, self.depth_double_blocks)
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
