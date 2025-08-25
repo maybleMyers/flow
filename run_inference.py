@@ -110,6 +110,35 @@ def parse_args():
 
     return parser.parse_args()
 
+def generate_intelligent_filename(base_filename, cfg, seed, width, height, steps):
+    """
+    Generate an intelligent filename that includes key generation parameters.
+    
+    Args:
+        base_filename: The base filename (from --output parameter)
+        cfg: CFG scale value
+        seed: Random seed used
+        width: Image width
+        height: Image height
+        steps: Number of denoising steps
+    
+    Returns:
+        Enhanced filename with parameters
+    """
+    import os
+    
+    # Split the filename into name and extension
+    name, ext = os.path.splitext(base_filename)
+    
+    # If no extension provided, default to .png
+    if not ext:
+        ext = '.png'
+    
+    # Create the intelligent filename
+    intelligent_name = f"{name}_cfg{cfg}_seed{seed}_{width}x{height}_steps{steps}{ext}"
+    
+    return intelligent_name
+
 def main():
     args = parse_args()
     
@@ -223,10 +252,14 @@ def main():
         )
 
         # --- 6. Save Image ---
-        print(f"Saving image to {args.output}...")
+        # Generate intelligent filename with parameters
+        intelligent_filename = generate_intelligent_filename(
+            args.output, args.cfg, args.seed, args.width, args.height, args.steps
+        )
+        print(f"Saving image to {intelligent_filename}...")
         # Clamp, convert from [-1, 1] to [0, 1], and save
         output_image = output_image.clamp(-1, 1).add(1).div(2).to(torch.float32)
-        save_image(output_image[0], args.output)
+        save_image(output_image[0], intelligent_filename)
         
     print("\nInference complete!")
 
