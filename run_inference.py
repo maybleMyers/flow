@@ -295,15 +295,9 @@ def run_inference(model, t5_model, tokenizer, args):
             # Move embeddings to main device for model inference
             neg_embed = neg_embed.to(args.device)
             
-            # Store attention masks
-            pos_attention_mask = text_input['attention_mask']
-            neg_attention_mask = neg_input['attention_mask']
-            
-            # Store text embeddings in CPU memory
-            text_embed = text_embed.to('cpu')
-            neg_embed = neg_embed.to('cpu')
-            pos_attention_mask = pos_attention_mask.to('cpu')
-            neg_attention_mask = neg_attention_mask.to('cpu')
+            # Store attention masks on main device
+            pos_attention_mask = text_input['attention_mask'].to(args.device)
+            neg_attention_mask = neg_input['attention_mask'].to(args.device)
             
             # COMPLETELY UNLOAD T5 from GPU to free memory for main model
             print("Completely unloading T5 from GPU memory...")
@@ -315,12 +309,6 @@ def run_inference(model, t5_model, tokenizer, args):
             if args.show_memory_stats:
                 free_mem, total_mem = torch.cuda.mem_get_info()
                 print(f"GPU memory after T5 unload: {(total_mem - free_mem) / (1024**3):.2f}GB / {total_mem / (1024**3):.2f}GB")
-            
-            # Move embeddings back to main device for model inference  
-            text_embed = text_embed.to(args.device)
-            neg_embed = neg_embed.to(args.device)
-            pos_attention_mask = pos_attention_mask.to(args.device)
-            neg_attention_mask = neg_attention_mask.to(args.device)
             
             # Clean up input variables
             del text_input, neg_input
