@@ -25,6 +25,8 @@ Example Usage:
 
 import argparse
 import torch
+import numpy as np
+import scipy.stats
 from torchvision.utils import save_image
 from transformers import T5Tokenizer
 
@@ -35,33 +37,55 @@ from src.models.chroma.utils import prepare_latent_image_ids
 from src.models.chroma.module.t5 import T5EncoderModel, T5Config, replace_keys
 from src.general_utils import load_file_multipart, load_safetensors
 
-def get_euler_beta_schedule(num_steps, alpha=2.0, beta=5.0, device="cpu"):
+def flux_time_shift(mu: float, sigma: float, t):
+    """forge's flux_time_shift function used in Chroma models"""
+    import math
+    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
+
+def create_flux_sigmas(shift=1.15, timesteps=10000):
+    """Create Flux-style sigma schedule as used in forge for Chroma models"""
+    # Generate timesteps from 1/timesteps to 1.0
+    t_values = (torch.arange(1, timesteps + 1, 1) / timesteps)
+    # Apply flux time shift to create sigma schedule
+    sigmas = torch.tensor([flux_time_shift(shift, 1.0, t.item()) for t in t_values])
+    return sigmas
+
+def get_forge_beta_schedule(num_steps, alpha=0.6, beta=0.6, shift=1.15):
     """
-    Generates a timestep schedule based on a Beta distribution.
-    This often puts more steps towards the end (t=0) for detail refinement.
+    Exact implementation of forge's beta scheduler for Chroma models.
+    Uses forge's sigma generation + beta distribution sampling.
     """
-    print(f"Using Euler Beta scheduler with alpha={alpha}, beta={beta}")
-    # Create a Beta distribution
-    beta_dist = torch.distributions.beta.Beta(torch.tensor([alpha]), torch.tensor([beta]))
+    print(f"Using forge Beta scheduler with alpha={alpha}, beta={beta}, shift={shift}")
     
-    # Sample steps
-    sampled_steps = beta_dist.sample(sample_shape=(num_steps,)).squeeze(-1)
+    # Create forge's Flux sigma schedule (same as Chroma uses)
+    sigmas = create_flux_sigmas(shift=shift)
+    total_timesteps = len(sigmas) - 1
     
-    # Add the start and end points
-    timesteps = torch.cat([torch.tensor([1.0]), sampled_steps, torch.tensor([0.0])])
+    # Create linear timesteps from 1 to 0 (excluding endpoint)
+    ts = 1 - np.linspace(0, 1, num_steps, endpoint=False)
     
-    # Sort in descending order to go from t=1 to t=0
-    timesteps = torch.sort(timesteps, descending=True).values
+    # Use beta percent point function to transform timesteps
+    ts_transformed = scipy.stats.beta.ppf(ts, alpha, beta)
     
-    return timesteps.tolist()
+    # Map to sigma indices and extract actual sigma values
+    indices = np.rint(ts_transformed * total_timesteps).astype(int)
+    indices = np.clip(indices, 0, total_timesteps - 1)
+    
+    # Extract sigma values and convert to timesteps
+    selected_sigmas = sigmas[indices]
+    timesteps = selected_sigmas.tolist()
+    timesteps.append(0.0)  # Add final timestep
+    
+    return timesteps
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run ChromaRadiance inference correctly")
     # Beta
-    parser.add_argument("--scheduler", type=str, default="euler_beta", choices=["default", "euler_beta"],
-                        help="The timestep scheduler to use. The model creator recommends 'euler_beta'.")
-    parser.add_argument("--beta_alpha", type=float, default=2.0, help="Alpha parameter for the Euler Beta scheduler.")
-    parser.add_argument("--beta_beta", type=float, default=5.0, help="Beta parameter for the Euler Beta scheduler.")
+    parser.add_argument("--scheduler", type=str, default="forge_beta", choices=["default", "forge_beta"],
+                        help="The timestep scheduler to use. forge beta matches the working implementation.")
+    parser.add_argument("--beta_alpha", type=float, default=0.6, help="Alpha parameter for the forge Beta scheduler.")
+    parser.add_argument("--beta_beta", type=float, default=0.6, help="Beta parameter for the forge Beta scheduler.")
+    parser.add_argument("--shift", type=float, default=1.15, help="Shift parameter for Flux/Chroma time schedule.")
     # Core Paths
     parser.add_argument("--model_path", required=True, help="Path to the Chroma model (.pth or .safetensors)")
     parser.add_argument("--t5_path", required=True, help="Path to T5 model directory")
@@ -73,7 +97,7 @@ def parse_args():
     parser.add_argument("--negative_prompt", default="", help="Negative prompt")
     parser.add_argument("--output", default="output.png", help="Output image filename")
     parser.add_argument("--steps", type=int, default=30, help="Number of denoising steps")
-    parser.add_argument("--cfg", type=float, default=4.5, help="Classifier-Free Guidance scale. This is the main control for prompt strength.")
+    parser.add_argument("--cfg", type=float, default=5.0, help="Classifier-Free Guidance scale. This is the main control for prompt strength.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed. If not set, a random seed will be used.")
     parser.add_argument("--width", type=int, default=1024, help="Image width")
     parser.add_argument("--height", type=int, default=1024, help="Image height")
@@ -131,18 +155,26 @@ def main():
     with torch.no_grad():
         # --- 2. Encode Prompts with T5 ---
         print("Encoding text prompts...")
-        # Positive prompt
+        # Positive prompt with forge tokenizer options
         text_inputs = tokenizer(
-            [args.prompt], padding="max_length", max_length=args.t5_max_length,
-            truncation=True, return_tensors="pt"
+            [args.prompt], 
+            padding="max_length", 
+            max_length=max(args.t5_max_length, 3),  # min_length=3
+            truncation=True, 
+            return_tensors="pt",
+            pad_to_multiple_of=None  # min_padding=0 equivalent
         ).to(args.t5_device)
         text_embed = t5_model(text_inputs.input_ids, text_inputs.attention_mask).to(args.device)
         pos_attention_mask = text_inputs.attention_mask.to(args.device)
 
-        # Negative prompt
+        # Negative prompt with forge tokenizer options
         neg_inputs = tokenizer(
-            [args.negative_prompt], padding="max_length", max_length=args.t5_max_length,
-            truncation=True, return_tensors="pt"
+            [args.negative_prompt], 
+            padding="max_length", 
+            max_length=max(args.t5_max_length, 3),  # min_length=3
+            truncation=True, 
+            return_tensors="pt",
+            pad_to_multiple_of=None  # min_padding=0 equivalent
         ).to(args.t5_device)
         neg_embed = t5_model(neg_inputs.input_ids, neg_inputs.attention_mask).to(args.device)
         neg_attention_mask = neg_inputs.attention_mask.to(args.device)
@@ -167,8 +199,8 @@ def main():
         neg_text_ids = torch.zeros((1, args.t5_max_length, 3), device=args.device)
 
         # Timestep schedule
-        if args.scheduler == "euler_beta":
-            timesteps = get_euler_beta_schedule(args.steps, alpha=args.beta_alpha, beta=args.beta_beta)
+        if args.scheduler == "forge_beta":
+            timesteps = get_forge_beta_schedule(args.steps, alpha=args.beta_alpha, beta=args.beta_beta, shift=args.shift)
         else:
             # Fallback to the original scheduler from sampling.py
             timesteps = get_schedule(args.steps, 3) 
