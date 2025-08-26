@@ -1,41 +1,11 @@
-#!/usr/bin/env python3
-"""
-ChromaRadiance Inference Script using the training pipeline's `inference_wrapper`.
-
-This script has been modified to directly use the `inference_wrapper` function
-from the training code (`src.trainer.train_chroma_dct`). This simplifies the main
-inference logic but also means it inherits the wrapper's behavior, including:
-- A hardcoded empty negative prompt (the --negative_prompt argument is ignored).
-- A basic linear timestep scheduler (the forge_beta scheduler is not used).
-
-Example Usage:
-    python run_inference.py \
-        --model_path "/path/to/your/model.pth" \
-        --t5_path "/path/to/text_encoder_2" \
-        --t5_config "/path/to/text_encoder_2/config.json" \
-        --t5_tokenizer "/path/to/tokenizer_2" \
-        --prompt "a beautiful sunset over the ocean, professional photograph" \
-        --negative_prompt "blurry, low quality, cartoon" \
-        --output "sunset.png" \
-        --steps 30 \
-        --cfg 4.5 \
-        --seed 123 \
-        --width 1024 --height 1024
-"""
-
 import argparse
 import torch
 import os
 from torchvision.utils import save_image
 from transformers import T5Tokenizer
-
-# Import necessary components from your source files
 from src.models.chroma.model_dct import Chroma, chroma_params
 from src.models.chroma.module.t5 import T5EncoderModel, T5Config, replace_keys
 from src.general_utils import load_file_multipart, load_safetensors
-
-# MODIFICATION: Import the inference_wrapper from the training script
-# This function encapsulates the entire denoising process.
 from src.trainer.train_chroma_dct import inference_wrapper
 
 
@@ -82,7 +52,6 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # --- 1. Load Models ---
     print("Loading Chroma model...")
     with torch.device("meta"):
         model = Chroma(chroma_params)
@@ -92,7 +61,6 @@ def main():
     else:
         state_dict = torch.load(args.model_path, map_location="cpu")
     model.load_state_dict(state_dict, assign=True)
-    # The wrapper will move the model to the correct device
     model.to(args.device).eval().to(torch.bfloat16)
     del state_dict
 
@@ -103,7 +71,6 @@ def main():
         t5_model = T5EncoderModel(t5_config)
     t5_state_dict = replace_keys(load_file_multipart(args.t5_path))
     t5_model.load_state_dict(t5_state_dict, assign=True)
-    # The wrapper expects T5 on CPU initially, then it manages moving it to the GPU
     t5_model.to(args.t5_device).eval().to(torch.bfloat16)
     del t5_state_dict
     
@@ -123,15 +90,8 @@ def main():
 
     with torch.no_grad():
         # --- 2. Call the Inference Wrapper ---
-        # The wrapper handles text encoding, noise creation, the denoising loop,
-        # and device management of the T5 model.
         print(f"Running {args.steps} denoising steps via inference_wrapper...")
 
-        # NOTE: There's a bug in the provided `inference_wrapper` where it mixes up
-        # width and height in its `torch.randn` call. To get an image of size
-        # (width, height), we must pass `image_dim=(height, width)` to compensate.
-        # It expects (dim0, dim1) and creates a tensor of shape (..., 3, dim0, dim1),
-        # which corresponds to a height of dim0 and width of dim1.
         image_dimensions_for_wrapper = (args.height, args.width)
         
         output_image = inference_wrapper(
