@@ -323,6 +323,7 @@ def inference_wrapper(
     prompts: list,
     rank: int,
     first_n_steps_wo_cfg: int,
+    negative_prompts: Optional[list] = None,
     image_dim=(512, 512),
     t5_max_length=512,
 ):
@@ -330,8 +331,8 @@ def inference_wrapper(
     # test inference
     # aliasing
     SEED = seed
-    WIDTH = image_dim[0]
-    HEIGHT = image_dim[1]
+    HEIGHT = image_dim[0]
+    WIDTH = image_dim[1]
     STEPS = steps
     GUIDANCE = guidance
     CFG = cfg
@@ -348,7 +349,7 @@ def inference_wrapper(
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             # init random noise
             noise = torch.randn(
-                [len(PROMPT), 3, WIDTH, HEIGHT], 
+                [len(PROMPT), 3, HEIGHT, WIDTH], 
                 device=rank, 
                 dtype=torch.bfloat16, 
                 generator=torch.Generator(device=rank).manual_seed(seed)
@@ -358,7 +359,7 @@ def inference_wrapper(
 
             timesteps = get_schedule(STEPS, noise.shape[1])
 
-            # model.to("cpu")
+            model.to("cpu")
             t5.to(rank)  # load t5 to gpu
             text_inputs = t5_tokenizer(
                 PROMPT,
@@ -372,8 +373,13 @@ def inference_wrapper(
 
             t5_embed = t5(text_inputs.input_ids, text_inputs.attention_mask).to(rank)
 
+            if negative_prompts is None:
+                neg_prompt_text = [""] * len(PROMPT)
+            else:
+                neg_prompt_text = negative_prompts
+
             text_inputs_neg = t5_tokenizer(
-                [""]*len(PROMPT),
+                neg_prompt_text,
                 padding="max_length",
                 max_length=T5_MAX_LENGTH,
                 truncation=True,
