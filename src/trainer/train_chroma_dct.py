@@ -606,7 +606,7 @@ def inference_wrapper(
             text_ids = torch.zeros((len(PROMPT), T5_MAX_LENGTH, 3), device=rank)
             neg_text_ids = torch.zeros((len(PROMPT), T5_MAX_LENGTH, 3), device=rank)
 
-            # t5.to("cpu")
+            t5.to("cpu")
             model.to(rank)  # load model to gpu
             output_image = denoise_cfg(
                 model,
